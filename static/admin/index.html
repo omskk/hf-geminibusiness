@@ -170,7 +170,7 @@
                 <h2 class="text-xl font-bold mb-6 text-white">{{ editingAccount ? '编辑账号' : '添加新账号' }}</h2>
 
                 <!-- Batch Import Toggle -->
-                <div v-if="!editingAccount" class="mb-4">
+                <div class="mb-4">
                     <div class="flex gap-4 border-b border-gray-700 pb-2">
                         <button @click="importMode = false"
                             :class="{'text-blue-400 border-b-2 border-blue-400': !importMode, 'text-gray-500': importMode}"
@@ -181,12 +181,18 @@
                     </div>
                 </div>
 
-                <div v-if="importMode && !editingAccount">
+                <div v-if="importMode">
                     <label class="block text-sm text-gray-400 mb-2">直接粘贴内容 (支持 SECURE_C_SES=... 格式)</label>
                     <textarea v-model="importText" @input="parseImport" rows="8"
                         class="input-dark w-full px-3 py-2 rounded-lg font-mono text-xs"
                         placeholder="SECURE_C_SES=...&#10;CSESIDX=...&#10;CONFIG_ID=..."></textarea>
                     <p class="text-xs text-gray-500 mt-2">系统会自动识别 SECURE_C_SES, CSESIDX, CONFIG_ID 等字段</p>
+                    <div class="flex items-center gap-2 mt-2 text-xs text-blue-400">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span>{{ editingAccount ? '编辑模式：粘贴后可切换到"手动填写"调整' : '添加模式：解析后直接填入表单' }}</span>
+                    </div>
                 </div>
 
                 <form v-else @submit.prevent="submitForm" class="space-y-4">
@@ -232,7 +238,7 @@
                     </div>
                 </form>
 
-                <div v-if="importMode && !editingAccount" class="flex justify-end gap-3 mt-4">
+                <div v-if="importMode" class="flex justify-end gap-3 mt-4">
                     <button type="button" @click="closeModal"
                         class="px-4 py-2 rounded-lg hover:bg-gray-800 transition-colors">取消</button>
                     <button type="button" @click="applyImport" :disabled="!isImportValid"
