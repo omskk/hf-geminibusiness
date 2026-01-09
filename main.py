@@ -158,6 +158,7 @@ class Account:
         self.host_c_oses = data.get("host_c_oses")
         self.csesidx = data["csesidx"]
         self.config_id = data["config_id"]
+        self.is_active = data.get("is_active", True)
         
         self.jwt_mgr = JWTManager(data)
         self.lock = asyncio.Lock() # For account-level operations if needed
@@ -213,10 +214,10 @@ class AccountPool:
                      # Actually self.accounts contains all. We rely on is_active in DB, but here we only have loaded accounts
                      pass
             
-            # Simple approach: Return the first account. 
-            # In a real failover system, we might want to check health, but here we just return index 0
-            if self.accounts:
-                 return self.accounts[0]
+                # Failover logic: Return first active account that is not marked as disabled
+            for acc in self.accounts:
+                if acc.is_active:  # Check account's active status
+                    return acc
             
             return None
 
@@ -444,6 +445,47 @@ async def admin_delete_account(id: int):
     await account_pool.load_accounts() # Refresh pool
     return {"status": "ok"}
 
+@app.post("/api/admin/accounts/{id}/test", dependencies=[Depends(verify_api_key)])
+async def admin_test_account(id: int):
+    """测试指定账号是否可用"""
+    account = account_pool.get_account_by_id(id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    try:
+        # 尝试获取 JWT
+        jwt = await account.get_jwt()
+        
+        # 尝试创建 Session
+        session_name = await create_google_session(account)
+        
+        # 清理测试 Session
+        return {
+            "status": "success",
+            "message": "账号测试成功",
+            "account_id": id,
+            "account_name": account.name
+        }
+    except Exception as e:
+        status_code = e.status_code if isinstance(e, HTTPException) else 500
+        error_msg = str(e)
+        
+        # 如果是 401 错误，自动禁用账号
+        if status_code == 401:
+            await db.update_account(id, {"is_active": False})
+            await account_pool.load_accounts()
+            logger.warning(f"🚫 测试失败，已自动禁用账号 [{id}]")
+        
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "failed",
+                "message": f"账号测试失败: {error_msg}",
+                "account_id": id,
+                "error_code": status_code
+            }
+        )
+
 
 class Message(BaseModel):
     role: str
@@ -645,16 +687,45 @@ async def chat(req: ChatRequest, request: Request):
 
             except (httpx.ConnectError, httpx.ReadTimeout, ssl.SSLError, HTTPException) as e:
                 retry_count += 1
-                logger.warning(f"⚠️ 请求异常 (重试 {retry_count}/{max_retries}): {e}")
+                status_code = e.status_code if isinstance(e, HTTPException) else None
+                error_detail = str(e)
+                
+                logger.warning(f"⚠️ 请求异常 (重试 {retry_count}/{max_retries}): {error_detail}")
+
+                # 🔥 方案3：自动禁用失效账号
+                # 检测到 401 认证失败，且不是第一次重试
+                if status_code == 401 and retry_count >= max_retries:
+                    logger.warning(f"🚫 账号 [{current_acc.id}] 认证失效 (401)，自动禁用")
+                    try:
+                        if current_acc.id > 0:  # 排除 fallback 账号
+                            await db.update_account(current_acc.id, {"is_active": False})
+                            await account_pool.load_accounts()  # 重新加载账号池
+                            logger.info(f"✅ 已自动禁用账号 [{current_acc.id}] 并刷新账号池")
+                    except Exception as db_err:
+                        logger.error(f"❌ 更新数据库失败: {db_err}")
 
                 if retry_count <= max_retries:
-                    # 尝试重建 Session (仍使用当前账号)
-                    logger.info("🔄 尝试重建 Session...")
+                    # 尝试切换账号或重建 Session
+                    if status_code == 401 and current_acc.id > 0:
+                        # 401 错误：尝试切换到其他可用账号
+                        logger.info("🔄 检测到 401，尝试切换账号...")
+                        new_acc = await account_pool.get_next_account()
+                        if new_acc and new_acc.id != current_acc.id:
+                            logger.info(f"✅ 切换到账号 [{new_acc.id}] {new_acc.name}")
+                            current_acc = new_acc
+                        else:
+                            logger.warning("⚠️ 无其他可用账号，继续重建 Session")
+                            new_sess = await create_google_session(current_acc)
+                    else:
+                        # 其他错误：重建 Session
+                        logger.info("🔄 尝试重建 Session...")
+                        new_sess = await create_google_session(current_acc)
+                    
                     try:
                         new_sess = await create_google_session(current_acc)
                         if conv_key in SESSION_CACHE:
                             SESSION_CACHE[conv_key]["session_id"] = new_sess
-                            # account_id keeps same
+                            SESSION_CACHE[conv_key]["account_id"] = current_acc.id
                         
                         current_sess = new_sess
                         current_retry_mode = True 
@@ -664,7 +735,7 @@ async def chat(req: ChatRequest, request: Request):
                         if req.stream: yield f"data: {json.dumps({'error': {'message': 'Session Recovery Failed'}})}\n\n"
                         return
                 else:
-                    if req.stream: yield f"data: {json.dumps({'error': {'message': f'Final Error: {e}'}})}\n\n"
+                    if req.stream: yield f"data: {json.dumps({'error': {'message': f'Final Error: {error_detail}'}})}\n\n"
                     return
 
     if req.stream:
