@@ -20,6 +20,36 @@
             background: rgba(22, 27, 34, 0.7);
             backdrop-filter: blur(10px);
             border: 1px solid rgba(48, 54, 61, 0.5);
+            height: 320px; /* 固定卡片高度 */
+            display: flex;
+            flex-direction: column;
+        }
+
+        .card-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .text-ellipsis {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .text-ellipsis-2 {
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        .text-ellipsis-3 {
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
         }
 
         .input-dark {
@@ -89,6 +119,24 @@
             border-color: rgba(56, 139, 253, 0.3);
         }
 
+        .health-healthy {
+            background: rgba(46, 160, 67, 0.1);
+            color: #3fb950;
+            border-color: rgba(46, 160, 67, 0.3);
+        }
+
+        .health-unhealthy {
+            background: rgba(218, 54, 51, 0.1);
+            color: #f85149;
+            border-color: rgba(218, 54, 51, 0.3);
+        }
+
+        .health-unknown {
+            background: rgba(139, 92, 246, 0.1);
+            color: #a371f7;
+            border-color: rgba(139, 92, 246, 0.3);
+        }
+
         .pulse {
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
@@ -123,7 +171,7 @@
                 </div>
             </div>
 
-            <div class="flex items-center gap-3">
+                <div class="flex items-center gap-3">
                 <button @click="showAddModal = true"
                     class="group flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-600/20 transition-all hover:border-blue-500/50">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 transition-transform group-hover:rotate-90"
@@ -133,6 +181,17 @@
                             clip-rule="evenodd" />
                     </svg>
                     <span class="text-sm font-medium">添加节点</span>
+                </button>
+
+                <button @click="runHealthCheck" :disabled="healthChecking"
+                    class="group flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-600/20 transition-all hover:border-emerald-500/50 disabled:opacity-50">
+                    <svg v-if="!healthChecking" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clip-rule="evenodd" />
+                    </svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233 2.153 1.233 2.153a1 1 0 01-.894 1.79l-1.599-.8-3.954 1.582v1.323a1 1 0 11-2 0v-1.323l-3.954-1.582-1.599.8a1 1 0 01-.894-1.79l1.233-2.153-1.233-2.153a1 1 0 01.894-1.79l1.599.8L9 4.323V3a1 1 0 011-1z" clip-rule="evenodd" />
+                    </svg>
+                    <span class="text-sm font-medium">{{ healthChecking ? '检查中...' : '健康检查' }}</span>
                 </button>
 
                 <div class="h-6 w-px bg-gray-700 mx-1"></div>
@@ -159,19 +218,21 @@
             <div v-for="acc in accounts" :key="acc.id"
                 class="glass rounded-xl p-5 relative group hover:border-gray-500 transition-all duration-300">
 
-                <div class="flex justify-between items-start mb-4">
-                    <div>
-                        <h3 class="font-bold text-lg text-white mb-1">{{ acc.name }}</h3>
-                        <span :class="getStatusClass(acc)">
-                            {{ getStatusText(acc) }}
-                        </span>
+                <div class="card-content relative">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <h3 class="font-bold text-lg text-white mb-1 text-ellipsis">{{ acc.name }}</h3>
+                            <span :class="getStatusClass(acc)">
+                                {{ getStatusText(acc) }}
+                            </span>
+                        </div>
                     </div>
-                    <div class="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button @click="testAccount(acc)" 
-                            :disabled="acc.testing"
+                    <div class="absolute top-8 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button @click="checkAccountHealth(acc)" 
+                            :disabled="acc.healthChecking"
                             class="p-1.5 hover:bg-gray-700 rounded text-blue-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                            title="测试连接">
-                            <svg v-if="!acc.testing" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20"
+                            title="健康检查">
+                            <svg v-if="!acc.healthChecking" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20"
                                 fill="currentColor">
                                 <path fill-rule="evenodd"
                                     d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z"
@@ -182,6 +243,13 @@
                                 <path fill-rule="evenodd"
                                     d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233 2.153 1.233 2.153a1 1 0 01-.894 1.79l-1.599-.8-3.954 1.582v1.323a1 1 0 11-2 0v-1.323l-3.954-1.582-1.599.8a1 1 0 01-.894-1.79l1.233-2.153-1.233-2.153a1 1 0 01.894-1.79l1.599.8L9 4.323V3a1 1 0 011-1z"
                                     clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                        <button v-if="!acc.is_active" @click="enableAccount(acc)" 
+                            class="p-1.5 hover:bg-gray-700 rounded text-emerald-400"
+                            title="启用账号">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
                             </svg>
                         </button>
                         <button @click="editAccount(acc)" class="p-1.5 hover:bg-gray-700 rounded text-blue-400"
@@ -202,12 +270,11 @@
                             </svg>
                         </button>
                     </div>
-                </div>
 
                 <div class="space-y-2 text-sm text-gray-400">
                     <div class="flex flex-col">
                         <span class="text-xs font-mono uppercase tracking-widest text-gray-500">配置 ID (Config ID)</span>
-                        <code class="bg-black/30 px-1 py-0.5 rounded">{{ acc.config_id }}</code>
+                        <code class="bg-black/30 px-1 py-0.5 rounded text-ellipsis">{{ acc.config_id }}</code>
                     </div>
                     <div class="flex flex-col">
                         <span class="text-xs font-mono uppercase tracking-widest text-gray-500">上次使用</span>
@@ -217,23 +284,31 @@
                         <span class="text-xs font-mono uppercase tracking-widest text-gray-500">调用次数</span>
                         <span class="font-mono text-blue-400">{{ acc.request_count || 0 }}</span>
                     </div>
+                    <div class="flex flex-col">
+                        <span class="text-xs font-mono uppercase tracking-widest text-gray-500">健康状态</span>
+                        <span :class="getHealthStatusClass(acc.health_status)">
+                            {{ getHealthStatusText(acc.health_status) }}
+                        </span>
+                    </div>
+                    <div v-if="acc.health_check_time" class="flex flex-col">
+                        <span class="text-xs font-mono uppercase tracking-widest text-gray-500">最后检查</span>
+                        <span>{{ formatDate(acc.health_check_time) }}</span>
+                    </div>
                 </div>
 
-                <!-- Test Result -->
-                <div v-if="acc.testResult" class="mt-3 p-2 rounded text-xs" :class="acc.testResult.success ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'">
-                    {{ acc.testResult.message }}
+                <!-- Disabled Reason -->
+                <div v-if="acc.disabled_reason" class="mt-2 p-2 rounded text-xs bg-red-500/10 text-red-400 border border-red-500/20">
+                    <div class="flex items-center gap-1 mb-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                        <span class="font-medium">禁用原因</span>
+                    </div>
+                    <div class="text-ellipsis-2">{{ acc.disabled_reason }}</div>
                 </div>
+
+
             </div>
-
-            <!-- Add New Card -->
-            <button @click="showAddModal = true"
-                class="glass rounded-xl p-5 flex flex-col items-center justify-center text-gray-500 hover:text-white hover:border-blue-500/50 transition-all border-dashed">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mb-2" fill="none" viewBox="0 0 24 24"
-                    stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                </svg>
-                <span class="font-medium">添加账号</span>
-            </button>
         </div>
 
         <!-- Add/Edit Modal -->
@@ -319,6 +394,49 @@
                     <button type="button" @click="applyImport" :disabled="!isImportValid"
                         class="btn-primary px-6 py-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
                         解析并填入
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Health Check Result Modal -->
+        <div v-if="showHealthResult" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <div class="glass w-full max-w-md rounded-2xl p-6 border-emerald-500/30">
+                <div class="flex items-center gap-3 mb-4">
+                    <div class="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-white">健康检查完成</h3>
+                        <p class="text-sm text-gray-400">{{ healthResult.summary }}</p>
+                    </div>
+                </div>
+
+                <div class="space-y-3 mb-6">
+                    <div v-for="result in healthResult.results" :key="result.account_id" 
+                        class="p-3 rounded-lg border" :class="getStatusBorderClass(result)">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="font-medium text-white">{{ result.account_name }}</span>
+                            <span class="text-xs px-2 py-1 rounded" :class="getStatusBadgeClass(result)">
+                                {{ result.status === 'success' ? '✓ 正常' : '✗ 异常' }}
+                            </span>
+                        </div>
+                        <div class="text-xs text-gray-400">
+                            <div>状态: {{ result.status === 'success' ? '正常' : '异常' }}</div>
+                            <div v-if="result.message">详情: {{ result.message }}</div>
+                            <div v-if="result.disabled" class="text-red-400 mt-1">
+                                ⚠️ 已自动禁用
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end">
+                    <button @click="showHealthResult = false" 
+                        class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors">
+                        确定
                     </button>
                 </div>
             </div>
@@ -503,46 +621,6 @@
                     }
                 }
 
-                const testAccount = async (acc) => {
-                    // Reset test result
-                    acc.testResult = null
-                    acc.testing = true
-
-                    try {
-                        const res = await fetch(`/api/admin/accounts/${acc.id}/test`, {
-                            method: 'POST',
-                            headers: getHeaders()
-                        })
-
-                        if (res.ok) {
-                            acc.testResult = {
-                                success: true,
-                                message: '测试成功，账号可用'
-                            }
-                        } else {
-                            const data = await res.json()
-                            acc.testResult = {
-                                success: false,
-                                message: `测试失败: ${data.detail.message || '未知错误'}`
-                            }
-                            // Reload to show updated status
-                            await loadAccounts()
-                        }
-                    } catch (e) {
-                        acc.testResult = {
-                            success: false,
-                            message: `测试失败: ${e.message}`
-                        }
-                    } finally {
-                        acc.testing = false
-                        // Clear result after 5 seconds
-                        setTimeout(() => {
-                            if (acc.testResult) {
-                                acc.testResult = null
-                            }
-                        }, 5000)
-                    }
-                }
 
                 const getStatusClass = (acc) => {
                     if (acc.testing) return 'status-badge status-testing pulse'
@@ -563,6 +641,154 @@
                     return new Date(ts).toLocaleString()
                 }
 
+                // 健康检查相关函数
+                const healthChecking = ref(false)
+                const showHealthResult = ref(false)
+                const healthResult = ref({})
+
+                const runHealthCheck = async () => {
+                    healthChecking.value = true
+                    try {
+                        const res = await fetch('/api/admin/health-check', {
+                            method: 'POST',
+                            headers: getHeaders()
+                        })
+                        
+                        if (res.ok) {
+                            const data = await res.json()
+                            const successCount = data.results.filter(r => r.status === 'success').length
+                            const failedCount = data.results.filter(r => r.status === 'failed').length
+                            const disabledCount = data.results.filter(r => r.disabled).length
+                            
+                            healthResult.value = {
+                                summary: `成功: ${successCount} | 失败: ${failedCount} | 禁用: ${disabledCount}`,
+                                results: data.results
+                            }
+                            showHealthResult.value = true
+                        } else {
+                            alert('健康检查失败: ' + res.statusText)
+                        }
+                        
+                        await loadAccounts()
+                    } catch (e) {
+                        alert('健康检查异常: ' + e.message)
+                    } finally {
+                        healthChecking.value = false
+                    }
+                }
+
+                const checkAccountHealth = async (acc) => {
+                    acc.healthChecking = true
+                    try {
+                        const res = await fetch(`/api/admin/accounts/${acc.id}/health-check`, {
+                            method: 'POST',
+                            headers: getHeaders()
+                        })
+                        
+                        const result = await res.json()
+                        
+                        // 单个账号检查使用 Toast 提示
+                        const toast = document.createElement('div')
+                        toast.className = 'fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg z-50 animate-pulse text-white flex items-center gap-2'
+                        
+                        if (result.disabled) {
+                            toast.className += ' bg-orange-600'
+                            toast.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                </svg>
+                                <span class="text-white">账号 "${acc.name}" 已被自动禁用</span>
+                            `
+                        } else if (result.status === 'success') {
+                            toast.className += ' bg-emerald-600'
+                            toast.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                                </svg>
+                                <span class="text-white">账号 "${acc.name}" 健康检查通过</span>
+                            `
+                        } else {
+                            toast.className += ' bg-red-600'
+                            toast.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                                </svg>
+                                <span class="text-white">账号 "${acc.name}" 健康检查失败</span>
+                            `
+                        }
+                        
+                        document.body.appendChild(toast)
+                        setTimeout(() => toast.remove(), 3000)
+                        
+                        await loadAccounts()
+                    } catch (e) {
+                        alert('健康检查异常: ' + e.message)
+                    } finally {
+                        acc.healthChecking = false
+                    }
+                }
+
+                const getStatusBorderClass = (result) => {
+                    if (result.status === 'success') {
+                        return 'border-emerald-500/30 bg-emerald-500/5'
+                    } else {
+                        return 'border-red-500/30 bg-red-500/5'
+                    }
+                }
+
+                const getStatusBadgeClass = (result) => {
+                    if (result.status === 'success') {
+                        return 'bg-emerald-500/20 text-emerald-400'
+                    } else {
+                        return 'bg-red-500/20 text-red-400'
+                    }
+                }
+
+                const enableAccount = async (acc) => {
+                    if (!confirm(`确定要启用账号 "${acc.name}" 吗？`)) return
+                    
+                    try {
+                        const res = await fetch(`/api/admin/accounts/${acc.id}/enable`, {
+                            method: 'POST',
+                            headers: getHeaders()
+                        })
+                        
+                        if (res.ok) {
+                            alert(`账号 ${acc.name} 已启用`)
+                        } else {
+                            alert('启用失败: ' + res.statusText)
+                        }
+                        
+                        await loadAccounts()
+                    } catch (e) {
+                        alert('启用异常: ' + e.message)
+                    }
+                }
+
+                const getHealthStatusClass = (status) => {
+                    switch (status) {
+                        case 'healthy':
+                            return 'status-badge health-healthy'
+                        case 'unhealthy':
+                            return 'status-badge health-unhealthy'
+                        case 'unknown':
+                        default:
+                            return 'status-badge health-unknown'
+                    }
+                }
+
+                const getHealthStatusText = (status) => {
+                    switch (status) {
+                        case 'healthy':
+                            return '✓ 健康'
+                        case 'unhealthy':
+                            return '✗ 异常'
+                        case 'unknown':
+                        default:
+                            return '? 未知'
+                    }
+                }
+
                 onMounted(() => {
                     if (apiKey.value) {
                         loadAccounts()
@@ -577,7 +803,10 @@
                     importMode, importText, isImportValid, parseImport, applyImport,
                     loadAccounts, closeModal, submitForm, editAccount, deleteAccount, formatDate,
                     showAuthModal, apiKeyInput, saveKey, logout, apiKey,
-                    testAccount, getStatusClass, getStatusText
+                    getStatusClass, getStatusText,
+                    healthChecking, runHealthCheck, checkAccountHealth, enableAccount,
+                    getHealthStatusClass, getHealthStatusText,
+                    showHealthResult, healthResult, getStatusBorderClass, getStatusBadgeClass
                 }
             }
         }).mount('#app')

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import db  # Import database instance
+from cache_manager import init_session_pool, get_session_pool
 
 # ---------- 日志配置 ----------
 logging.basicConfig(
@@ -35,6 +36,26 @@ ENV_CONFIG_ID    = os.getenv("CONFIG_ID")
 PROXY        = os.getenv("PROXY") or None
 TIMEOUT_SECONDS = 600 
 
+# 健康检查配置
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "300"))  # 5分钟
+HEALTH_CHECK_ENABLED = os.getenv("HEALTH_CHECK_ENABLED", "true").lower() == "true"
+HEALTH_CHECK_TIMEOUT = int(os.getenv("HEALTH_CHECK_TIMEOUT", "30"))  # 30秒超时
+HEALTH_CHECK_RETRY_COUNT = int(os.getenv("HEALTH_CHECK_RETRY_COUNT", "2"))  # 重试次数
+HEALTH_CHECK_CONCURRENT_LIMIT = int(os.getenv("HEALTH_CHECK_CONCURRENT_LIMIT", "5"))  # 并发限制
+HEALTH_CHECK_AUTO_DISABLE = os.getenv("HEALTH_CHECK_AUTO_DISABLE", "true").lower() == "true"  # 自动禁用
+HEALTH_CHECK_NETWORK_ERROR_THRESHOLD = int(os.getenv("HEALTH_CHECK_NETWORK_ERROR_THRESHOLD", "3"))  # 网络错误阈值
+
+# 会话池配置
+SESSION_POOL_CONFIG = {
+    'CACHE_HOT_SIZE': int(os.getenv("CACHE_HOT_SIZE", "5000")),
+    'CACHE_WARM_SIZE': int(os.getenv("CACHE_WARM_SIZE", "3000")),
+    'CACHE_COLD_SIZE': int(os.getenv("CACHE_COLD_SIZE", "2000")),
+    'SESSION_TTL': int(os.getenv("SESSION_TTL", "7200")),
+    'CACHE_CLEANUP_INTERVAL': int(os.getenv("CACHE_CLEANUP_INTERVAL", "300")),
+    'MEMORY_WARNING_THRESHOLD': float(os.getenv("MEMORY_WARNING_THRESHOLD", "0.8")),
+    'MEMORY_CRITICAL_THRESHOLD': float(os.getenv("MEMORY_CRITICAL_THRESHOLD", "0.9"))
+}
+
 # ---------- 模型映射配置 ----------
 MODEL_MAPPING = {
     "gemini-auto": None,
@@ -52,6 +73,209 @@ http_client = httpx.AsyncClient(
     timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0),
     limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
 )
+
+# ---------- 账号池管理 ----------
+
+# ---------- 健康检查器 ----------
+class HealthChecker:
+    """账号健康检查器"""
+    
+    # 需要自动禁用的错误码
+    AUTO_DISABLE_ERROR_CODES = [401, 403, 429]
+    
+    # 需要自动禁用的错误关键词
+    AUTO_DISABLE_ERROR_KEYWORDS = [
+        "authentication failed",
+        "unauthorized", 
+        "forbidden",
+        "rate limit",
+        "quota exceeded",
+        "account suspended",
+        "invalid credentials",
+        "token expired",
+        "session expired"
+    ]
+    
+    @staticmethod
+    async def check_account_health(account) -> dict:
+        """检查单个账号的健康状态"""
+        start_time = time.time()
+        
+        try:
+            logger.info(f"🏥 开始检查账号 [{account.id}] {account.name} 的健康状态")
+            
+            # 尝试获取JWT
+            jwt = await account.get_jwt()
+            
+            # 尝试创建测试会话
+            session_name = await create_google_session(account)
+            
+            # 计算检查耗时
+            check_duration = round((time.time() - start_time) * 1000, 2)
+            
+            # 更新健康状态为健康
+            await db.update_health_status(account.id, "healthy")
+            
+            logger.info(f"✅ 账号 [{account.id}] 健康检查通过，耗时 {check_duration}ms")
+            
+            return {
+                "status": "success",
+                "account_id": account.id,
+                "account_name": account.name,
+                "message": "账号健康",
+                "check_duration_ms": check_duration,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+        except HTTPException as e:
+            status_code = e.status_code
+            error_msg = str(e)
+            check_duration = round((time.time() - start_time) * 1000, 2)
+            
+            # 直接禁用账号（按用户要求）
+            reason = f"HEALTH_CHECK_{status_code}: {error_msg[:200]}"  # 限制原因长度
+            await db.disable_account_with_reason(account.id, reason)
+            logger.warning(f"🚫 账号 [{account.id}] 健康检查失败，已自动禁用: {reason}")
+            
+            return {
+                "status": "failed",
+                "account_id": account.id,
+                "account_name": account.name,
+                "error_code": status_code,
+                "message": f"账号自动禁用: {error_msg}",
+                "disabled": True,
+                "check_duration_ms": check_duration,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+                
+        except Exception as e:
+            # 其他异常 - 直接禁用账号（按用户要求）
+            error_msg = str(e)
+            check_duration = round((time.time() - start_time) * 1000, 2)
+            
+            reason = f"HEALTH_CHECK_EXCEPTION: {error_msg[:200]}"  # 限制原因长度
+            await db.disable_account_with_reason(account.id, reason)
+            logger.warning(f"🚫 账号 [{account.id}] 健康检查异常，已自动禁用: {reason}")
+            
+            return {
+                "status": "failed",
+                "account_id": account.id,
+                "account_name": account.name,
+                "message": f"账号自动禁用: {error_msg}",
+                "disabled": True,
+                "check_duration_ms": check_duration,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    
+    @staticmethod
+    async def check_account_with_timeout(account) -> dict:
+        """带超时的账号健康检查"""
+        try:
+            return await asyncio.wait_for(
+                HealthChecker.check_account_health(account),
+                timeout=HEALTH_CHECK_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            check_duration = HEALTH_CHECK_TIMEOUT * 1000
+            logger.warning(f"⏰ 账号 [{account.id}] 健康检查超时 ({HEALTH_CHECK_TIMEOUT}秒)")
+            
+            # 检查网络错误阈值
+            network_error_count = await db.increment_network_error_count(account.id)
+            should_disable = network_error_count >= HEALTH_CHECK_NETWORK_ERROR_THRESHOLD
+            
+            if should_disable:
+                reason = f"HEALTH_CHECK_TIMEOUT_{network_error_count}: 连续超时{network_error_count}次"
+                await db.disable_account_with_reason(account.id, reason)
+                await db.reset_network_error_count(account.id)  # 重置计数器
+                
+                return {
+                    "status": "failed",
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "message": f"账号因连续超时被自动禁用",
+                    "disabled": True,
+                    "check_duration_ms": check_duration,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            else:
+                await db.update_health_status(account.id, "unhealthy")
+                
+                return {
+                    "status": "failed",
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "message": f"健康检查超时 ({network_error_count}/{HEALTH_CHECK_NETWORK_ERROR_THRESHOLD})",
+                    "disabled": False,
+                    "check_duration_ms": check_duration,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+    
+    @staticmethod
+    async def run_health_check_all():
+        """运行所有账号的健康检查（并发版本）"""
+        logger.info("🏥 开始执行全局健康检查...")
+        
+        # 修改：只检查数据库中状态为正常的账号
+        accounts_to_check = await db.get_healthy_accounts_for_health_check()
+        if not accounts_to_check:
+            logger.info("📭 没有需要检查的账号")
+            return []  # 返回空列表而不是None
+        
+        logger.info(f"📋 将检查 {len(accounts_to_check)} 个账号，并发限制: {HEALTH_CHECK_CONCURRENT_LIMIT}")
+        
+        results = []
+        
+        # 使用信号量控制并发数量
+        semaphore = asyncio.Semaphore(HEALTH_CHECK_CONCURRENT_LIMIT)
+        
+        async def check_with_semaphore(account_data):
+            async with semaphore:
+                account = Account(account_data)
+                try:
+                    result = await HealthChecker.check_account_with_timeout(account)
+                    return result
+                except Exception as e:
+                    # 兜底异常处理
+                    logger.error(f"❌ 账号 [{account.id}] 检查过程异常: {e}")
+                    return {
+                        "status": "failed",
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "message": f"检查过程异常: {str(e)}",
+                        "disabled": False,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+        
+        # 并发执行健康检查
+        tasks = [check_with_semaphore(account_data) for account_data in accounts_to_check]
+        
+        # 使用 asyncio.gather 收集结果，即使有部分失败也继续
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 处理异常结果
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"❌ 账号检查任务异常: {result}")
+                processed_results.append({
+                    "status": "failed",
+                    "account_id": accounts_to_check[i].get("id", "unknown"),
+                    "account_name": accounts_to_check[i].get("name", "unknown"),
+                    "message": f"任务异常: {str(result)}",
+                    "disabled": False,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                processed_results.append(result)
+        
+        # 统计结果
+        success_count = sum(1 for r in processed_results if r["status"] == "success")
+        failed_count = len(processed_results) - success_count
+        disabled_count = sum(1 for r in processed_results if r.get("disabled", False))
+        
+        logger.info(f"🏥 健康检查完成: 成功 {success_count}, 失败 {failed_count}, 禁用 {disabled_count}")
+        
+        return processed_results
 
 # ---------- 工具函数 ----------
 def get_common_headers(jwt: str) -> dict:
@@ -206,20 +430,44 @@ class AccountPool:
         async with self._lock:
             if not self.accounts: return None
 
-            # Always pick the FIRST active account (Primary)
-            # This ensures stickiness unless the primary account fails/is disabled.
-            # No Round-Robin rotation.
-            for acc in self.accounts:
-                if acc.id > 0: # Check real active flag if needed, but assuming self.accounts list is filtered/managed
-                     # Actually self.accounts contains all. We rely on is_active in DB, but here we only have loaded accounts
-                     pass
-            
-                # Failover logic: Return first active account that is not marked as disabled
-            for acc in self.accounts:
-                if acc.is_active:  # Check account's active status
-                    return acc
-            
-            return None
+            # 重新从数据库加载最新的账号状态，确保获取最新的 is_active 状态
+            try:
+                await db.connect()
+                active_accounts_data = await db.fetch_active_accounts()
+                if not active_accounts_data:
+                    logger.warning("⚠️ 数据库中没有活跃账号")
+                    return None
+                
+                # 更新内存中的账号列表和状态
+                self.accounts = [Account(data) for data in active_accounts_data]
+                logger.info(f"🔄 已刷新账号池，当前有 {len(self.accounts)} 个活跃账号")
+                
+                # 返回第一个活跃账号
+                if self.accounts:
+                    account = self.accounts[0]
+                    logger.info(f"🛡️ [Primary/Sticky] Using Account: [{account.id}] {account.name}")
+                    return account
+                else:
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"❌ 刷新账号池失败: {e}")
+                # 如果刷新失败，使用内存中的账号列表，但要检查 is_active 状态
+                for acc in self.accounts:
+                    if acc.is_active:
+                        logger.info(f"🛡️ [Fallback] Using Account: [{acc.id}] {acc.name}")
+                        return acc
+                return None
+
+    async def ensure_account_availability(self) -> bool:
+        """确保有可用的活跃账号"""
+        try:
+            await db.connect()
+            active_accounts_data = await db.fetch_active_accounts()
+            return len(active_accounts_data) > 0
+        except Exception as e:
+            logger.error(f"❌ 检查账号可用性失败: {e}")
+            return False
 
     def get_account_by_id(self, account_id: int) -> Optional[Account]:
         for acc in self.accounts:
@@ -228,11 +476,6 @@ class AccountPool:
         return None
 
 account_pool = AccountPool()
-
-# 全局 Session 缓存 (Extended)
-# Key: conv_key
-# Value: {"session_id": str, "account_id": int, "updated_at": float}
-SESSION_CACHE: Dict[str, dict] = {}
 
 # 用户模型偏好缓存 (Model Stickiness)
 # Key: client_ip
@@ -382,13 +625,145 @@ def build_full_context_text(messages: List['Message']) -> str:
         prompt += f"{role_name}: {content_str}\n\n"
     return prompt
 
+# ---------- 定时健康检查任务 ----------
+async def run_startup_health_check():
+    """启动时执行一次健康检查"""
+    if not HEALTH_CHECK_ENABLED:
+        logger.info("🏥 启动健康检查已禁用")
+        return
+    
+    logger.info("🏥 执行启动时健康检查...")
+    try:
+        results = await HealthChecker.run_health_check_all()
+        success_count = sum(1 for r in results if r["status"] == "success")
+        failed_count = len(results) - success_count
+        disabled_count = sum(1 for r in results if r.get("disabled", False))
+        logger.info(f"🏥 启动健康检查完成: 成功 {success_count}, 失败 {failed_count}, 禁用 {disabled_count}")
+    except Exception as e:
+        logger.error(f"❌ 启动健康检查失败: {e}")
+
+async def scheduled_health_check():
+    """定时健康检查任务"""
+    if not HEALTH_CHECK_ENABLED:
+        logger.info("🏥 定时健康检查已禁用")
+        return
+    
+    logger.info(f"🏥 定时健康检查任务启动，间隔: {HEALTH_CHECK_INTERVAL}秒")
+    
+    while True:
+        try:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+            await HealthChecker.run_health_check_all()
+        except asyncio.CancelledError:
+            logger.info("🏥 定时健康检查任务已停止")
+            break
+        except Exception as e:
+            logger.error(f"❌ 定时健康检查任务异常: {e}")
+            # 继续运行，不中断定时任务"
+
+# ---------- 账号自动禁用工具函数 ----------
+def should_disable_account_for_error(error: Exception) -> tuple[bool, str]:
+    """
+    判断是否需要因错误而禁用账号，并返回禁用原因
+    
+    Args:
+        error: 捕获的异常对象
+        
+    Returns:
+        tuple[bool, str]: (是否禁用, 禁用原因)
+    """
+    disable_reason = ""
+    
+    # 检查异常类型
+    if isinstance(error, HTTPException):
+        status_code = error.status_code
+        error_detail = str(error)
+        if status_code in [401, 403, 302, 429]:
+            disable_reason = f"HTTP_{status_code}: {error_detail[:200]}"
+            return True, disable_reason
+    else:
+        # 检查异常信息
+        error_detail = str(error)
+        error_lower = error_detail.lower()
+        if any(keyword in error_lower for keyword in [
+            "authentication failed",
+            "unauthorized", 
+            "forbidden",
+            "session expired",
+            "token expired",
+            "invalid credentials",
+            "getoxsrf failed",
+            "302"
+        ]):
+            disable_reason = f"EXCEPTION: {error_detail[:200]}"
+            return True, disable_reason
+    
+    return False, disable_reason
+
+async def auto_disable_account_if_needed(account: Account, error: Exception, session_pool, error_context: str = "API_CALL"):
+    """
+    根据错误自动禁用账号（如果需要）
+    
+    Args:
+        account: 账号对象
+        error: 捕获的异常对象
+        session_pool: 会话池对象
+        error_context: 错误上下文标识（如 "SESSION_CREATE", "API_CALL" 等）
+    """
+    if not account or account.id <= 0:
+        return
+    
+    should_disable, base_reason = should_disable_account_for_error(error)
+    if should_disable:
+        disable_reason = f"{error_context}_{base_reason}"
+        logger.warning(f"🚫 账号 [{account.id}] {error_context.lower()}失败，自动禁用: {disable_reason}")
+        try:
+            await db.disable_account_with_reason(account.id, disable_reason)
+            await account_pool.load_accounts()  # 重新加载账号池
+            # 清理该账号的所有会话
+            session_pool.clear_account_sessions(account.id)
+            logger.info(f"✅ 已自动禁用账号 [{account.id}] 并清理相关会话")
+        except Exception as db_err:
+            logger.error(f"❌ 更新数据库失败: {db_err}")
+
 # ---------- FastAPI App & Lifespan ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await account_pool.load_accounts()
+    
+    # 初始化会话池
+    session_pool = init_session_pool(SESSION_POOL_CONFIG)
+    await session_pool.start()
+    app.state.session_pool = session_pool
+    logger.info("🚀 会话池已初始化")
+    
+    # 启动时执行健康检查
+    if HEALTH_CHECK_ENABLED:
+        await run_startup_health_check()
+    
+    # 启动定时健康检查任务
+    if HEALTH_CHECK_ENABLED:
+        health_check_task = asyncio.create_task(scheduled_health_check())
+        app.state.health_check_task = health_check_task
+        logger.info("🏥 定时健康检查任务已启动")
+    
     yield
+    
     # Shutdown
+    if HEALTH_CHECK_ENABLED and hasattr(app.state, 'health_check_task'):
+        app.state.health_check_task.cancel()
+        try:
+            await app.state.health_check_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("🏥 定时健康检查任务已停止")
+    
+    # 停止会话池
+    if hasattr(app.state, 'session_pool'):
+        await app.state.session_pool.stop()
+        logger.info("🛑 会话池已停止")
+    
     await db.disconnect()
 
 # ---------- OpenAI 兼容接口 ----------
@@ -472,9 +847,10 @@ async def admin_test_account(id: int):
         
         # 如果是 401 错误，自动禁用账号
         if status_code == 401:
-            await db.update_account(id, {"is_active": False})
+            reason = f"API_TEST_401: {error_msg}"
+            await db.disable_account_with_reason(id, reason)
             await account_pool.load_accounts()
-            logger.warning(f"🚫 测试失败，已自动禁用账号 [{id}]")
+            logger.warning(f"🚫 测试失败，已自动禁用账号 [{id}]: {reason}")
         
         raise HTTPException(
             status_code=400,
@@ -486,6 +862,136 @@ async def admin_test_account(id: int):
             }
         )
 
+# ---------- 健康检查API端点 ----------
+@app.post("/api/admin/health-check", dependencies=[Depends(verify_api_key)])
+async def admin_run_health_check():
+    """手动触发全局健康检查"""
+    try:
+        results = await HealthChecker.run_health_check_all()
+        return {
+            "status": "completed",
+            "message": "健康检查完成",
+            "results": results,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ 健康检查执行失败: {e}")
+        raise HTTPException(status_code=500, detail=f"健康检查执行失败: {str(e)}")
+
+@app.post("/api/admin/accounts/{id}/health-check", dependencies=[Depends(verify_api_key)])
+async def admin_check_account_health(id: int):
+    """检查指定账号的健康状态"""
+    # 从数据库直接获取账号信息，而不是从account_pool（因为被禁用的账号不在pool中）
+    all_accounts = await db.get_all_accounts()
+    account_data = next((acc for acc in all_accounts if acc['id'] == id), None)
+    
+    if not account_data:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # 创建Account对象进行健康检查
+    account = Account(account_data)
+    result = await HealthChecker.check_account_health(account)
+    return result
+
+@app.get("/api/admin/health-status", dependencies=[Depends(verify_api_key)])
+async def admin_get_health_status():
+    """获取所有账号的健康状态"""
+    try:
+        accounts = await db.get_all_accounts()
+        summary = await db.get_health_summary()
+        
+        return {
+            "summary": summary,
+            "accounts": accounts,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ 获取健康状态失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取健康状态失败: {str(e)}")
+
+@app.post("/api/admin/accounts/{id}/enable", dependencies=[Depends(verify_api_key)])
+async def admin_enable_account(id: int):
+    """手动启用账号"""
+    try:
+        await db.enable_account(id)
+        await account_pool.load_accounts()
+        
+        return {
+            "status": "success",
+            "message": f"账号 [{id}] 已启用",
+            "account_id": id
+        }
+    except Exception as e:
+        logger.error(f"❌ 启用账号失败: {e}")
+        raise HTTPException(status_code=500, detail=f"启用账号失败: {str(e)}")
+
+# ---------- 缓存管理API端点 ----------
+@app.get("/api/admin/cache/stats", dependencies=[Depends(verify_api_key)])
+async def admin_get_cache_stats():
+    """获取缓存统计信息"""
+    try:
+        session_pool = get_session_pool()
+        if not session_pool:
+            raise HTTPException(status_code=503, detail="会话池未初始化")
+        
+        stats = session_pool.get_detailed_stats()
+        return {
+            "status": "success",
+            "data": stats,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ 获取缓存统计失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取缓存统计失败: {str(e)}")
+
+@app.post("/api/admin/cache/clear", dependencies=[Depends(verify_api_key)])
+async def admin_clear_cache(account_id: Optional[int] = None):
+    """清理缓存"""
+    try:
+        session_pool = get_session_pool()
+        if not session_pool:
+            raise HTTPException(status_code=503, detail="会话池未初始化")
+        
+        if account_id:
+            # 清理指定账号的会话
+            cleared = session_pool.clear_account_sessions(account_id)
+            message = f"已清理账号 [{account_id}] 的 {cleared} 个会话"
+        else:
+            # 清理所有缓存
+            session_pool.hot_cache.clear()
+            session_pool.warm_cache.clear()
+            session_pool.cold_cache.clear()
+            message = "已清理所有缓存"
+        
+        logger.info(f"🧹 {message}")
+        
+        return {
+            "status": "success",
+            "message": message,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ 清理缓存失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清理缓存失败: {str(e)}")
+
+@app.post("/api/admin/cache/cleanup", dependencies=[Depends(verify_api_key)])
+async def admin_force_cleanup():
+    """强制执行缓存清理"""
+    try:
+        session_pool = get_session_pool()
+        if not session_pool:
+            raise HTTPException(status_code=503, detail="会话池未初始化")
+        
+        await session_pool._perform_cleanup()
+        
+        return {
+            "status": "success",
+            "message": "强制清理已完成",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ 强制清理失败: {e}")
+        raise HTTPException(status_code=500, detail=f"强制清理失败: {str(e)}")
 
 class Message(BaseModel):
     role: str
@@ -540,10 +1046,21 @@ async def list_models(request: Request):
 
 @app.get("/health")
 async def health():
+    session_pool = get_session_pool()
+    cache_stats = None
+    if session_pool:
+        metrics = session_pool.get_metrics()
+        cache_stats = {
+            "total_sessions": metrics.total_sessions,
+            "hit_rate": round(metrics.hit_rate, 2),
+            "memory_usage_mb": round(metrics.memory_usage_mb, 2)
+        }
+    
     return {
         "status": "ok", 
         "time": datetime.utcnow().isoformat(),
-        "accounts_loaded": len(account_pool.accounts)
+        "accounts_loaded": len(account_pool.accounts),
+        "cache_stats": cache_stats
     }
 
 @app.post("/v1/chat/completions")
@@ -596,29 +1113,38 @@ async def chat(req: ChatRequest, request: Request):
     # 3. 锚定 Session
     # Fix Pydantic V2 deprecation warning
     conv_key = get_conversation_key([m.model_dump() for m in req.messages])
-    cached = SESSION_CACHE.get(conv_key)
+    
+    # 使用新的会话池
+    session_pool = get_session_pool()
+    if not session_pool:
+        raise HTTPException(status_code=503, detail="会话池未初始化")
+    
+    cached_session = session_pool.get_session(conv_key)
     
     account: Optional[Account] = None
     google_session: str = ""
     is_retry_mode = False
 
     # 3.1 尝试从缓存恢复
-    if cached:
-        cached_acc_id = cached.get("account_id", 0)
-        account = account_pool.get_account_by_id(cached_acc_id)
+    if cached_session:
+        account = account_pool.get_account_by_id(cached_session.account_id)
         
-        # 如果缓存的账号找不到了（比如被禁用），则需要重新开启新会话
-        if account:
-            google_session = cached["session_id"]
+        # 检查账号是否仍然可用（活跃且健康）
+        if account and await db.fetch_active_accounts() and any(acc['id'] == cached_session.account_id for acc in await db.fetch_active_accounts()):
+            google_session = cached_session.session_id
             text_to_send = last_text
             logger.info(f"♻️ 延续旧对话 [{req.model}][Acc:{account.id}]: {google_session[-12:]}")
-            SESSION_CACHE[conv_key]["updated_at"] = time.time()
         else:
-            logger.warning(f"⚠️ 缓存账号 ID {cached_acc_id} 不可用，强制开启新对话")
-            cached = None # Treat as new
+            logger.warning(f"⚠️ 缓存账号 ID {cached_session.account_id} 不可用，强制开启新对话")
+            cached_session = None # Treat as new
 
     # 3.2 开启新会话 (如果需要)
-    if not cached:
+    if not cached_session:
+        # 检查是否有可用的活跃账号
+        if not await account_pool.ensure_account_availability():
+            logger.error("❌ 没有可用的活跃账号")
+            raise HTTPException(status_code=503, detail="No active accounts available")
+        
         account = await account_pool.get_next_account()
         if not account:
             raise HTTPException(status_code=503, detail="No active accounts available")
@@ -629,14 +1155,16 @@ async def chat(req: ChatRequest, request: Request):
             google_session = await create_google_session(account)
             # 新对话使用全量文本上下文 (图片只传当前的)
             text_to_send = build_full_context_text(req.messages)
-            SESSION_CACHE[conv_key] = {
-                "session_id": google_session, 
-                "account_id": account.id,
-                "updated_at": time.time()
-            }
+            
+            # 存储到会话池
+            session_pool.put_session(conv_key, google_session, account.id)
             is_retry_mode = True
         except Exception as e:
             logger.error(f"❌ 开启会话失败: {e}")
+            
+            # 🔥 使用通用函数处理自动禁用
+            await auto_disable_account_if_needed(account, e, session_pool, "SESSION_CREATE")
+            
             raise HTTPException(status_code=500, detail=f"Failed to create session: {e}")
 
     chat_id = f"chatcmpl-{uuid.uuid4()}"
@@ -692,17 +1220,9 @@ async def chat(req: ChatRequest, request: Request):
                 
                 logger.warning(f"⚠️ 请求异常 (重试 {retry_count}/{max_retries}): {error_detail}")
 
-                # 🔥 方案3：自动禁用失效账号
-                # 检测到 401 认证失败，且不是第一次重试
-                if status_code == 401 and retry_count >= max_retries:
-                    logger.warning(f"🚫 账号 [{current_acc.id}] 认证失效 (401)，自动禁用")
-                    try:
-                        if current_acc.id > 0:  # 排除 fallback 账号
-                            await db.update_account(current_acc.id, {"is_active": False})
-                            await account_pool.load_accounts()  # 重新加载账号池
-                            logger.info(f"✅ 已自动禁用账号 [{current_acc.id}] 并刷新账号池")
-                    except Exception as db_err:
-                        logger.error(f"❌ 更新数据库失败: {db_err}")
+                # 🔥 使用通用函数处理自动禁用
+                if retry_count >= max_retries:
+                    await auto_disable_account_if_needed(current_acc, e, session_pool, "API_CALL")
 
                 if retry_count <= max_retries:
                     # 尝试切换账号或重建 Session
@@ -715,17 +1235,15 @@ async def chat(req: ChatRequest, request: Request):
                             current_acc = new_acc
                         else:
                             logger.warning("⚠️ 无其他可用账号，继续重建 Session")
-                            new_sess = await create_google_session(current_acc)
                     else:
                         # 其他错误：重建 Session
                         logger.info("🔄 尝试重建 Session...")
-                        new_sess = await create_google_session(current_acc)
                     
                     try:
                         new_sess = await create_google_session(current_acc)
-                        if conv_key in SESSION_CACHE:
-                            SESSION_CACHE[conv_key]["session_id"] = new_sess
-                            SESSION_CACHE[conv_key]["account_id"] = current_acc.id
+                        
+                        # 更新会话池
+                        session_pool.put_session(conv_key, new_sess, current_acc.id)
                         
                         current_sess = new_sess
                         current_retry_mode = True 

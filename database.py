@@ -42,14 +42,23 @@ class DatabaseManager:
                     is_active BOOLEAN DEFAULT TRUE,
                     request_count BIGINT DEFAULT 0,
                     last_used_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    disabled_reason TEXT,
+                    health_check_time TIMESTAMP,
+                    health_status VARCHAR(20) DEFAULT 'unknown'
                 );
                 
-                -- Migration: Add column if not exists
+                -- Migration: Add new columns if not exist
+                ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS disabled_reason TEXT;
+                ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS health_check_time TIMESTAMP;
+                ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS health_status VARCHAR(20) DEFAULT 'unknown';
                 ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS request_count BIGINT DEFAULT 0;
+                ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS network_error_count INTEGER DEFAULT 0;
+                ALTER TABLE gemini_accounts ADD COLUMN IF NOT EXISTS last_network_error_time TIMESTAMP;
                 
-                -- Create index for faster lookups if needed
+                -- Create indexes for faster lookups
                 CREATE INDEX IF NOT EXISTS idx_accounts_active ON gemini_accounts(is_active);
+                CREATE INDEX IF NOT EXISTS idx_accounts_health_status ON gemini_accounts(health_status);
             """)
 
     async def disconnect(self):
@@ -127,5 +136,100 @@ class DatabaseManager:
         if not self.pool: return
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM gemini_accounts WHERE id = $1", id)
+
+    # ---------- 健康检查相关方法 ----------
+    async def disable_account_with_reason(self, account_id: int, reason: str):
+        """禁用账号并记录原因"""
+        if not self.pool: return
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE gemini_accounts 
+                SET is_active = FALSE, 
+                    disabled_reason = $1, 
+                    health_status = 'unhealthy',
+                    health_check_time = NOW()
+                WHERE id = $2
+            """, reason, account_id)
+        logger.info(f"🚫 账号 [{account_id}] 已禁用，原因: {reason}")
+
+    async def update_health_status(self, account_id: int, status: str):
+        """更新账号健康状态"""
+        if not self.pool: return
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE gemini_accounts 
+                SET health_status = $1, health_check_time = NOW()
+                WHERE id = $2
+            """, status, account_id)
+
+    async def enable_account(self, account_id: int):
+        """启用账号"""
+        if not self.pool: return
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE gemini_accounts 
+                SET is_active = TRUE, 
+                    disabled_reason = NULL, 
+                    health_status = 'healthy'
+                WHERE id = $1
+            """, account_id)
+        logger.info(f"✅ 账号 [{account_id}] 已启用")
+
+    async def get_healthy_accounts_for_health_check(self) -> List[dict]:
+        """获取需要健康检查的账号（只检查 is_active = TRUE 的账号）"""
+        if not self.pool: return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM gemini_accounts 
+                WHERE is_active = TRUE
+                ORDER BY health_check_time ASC NULLS FIRST
+            """)
+            return [dict(row) for row in rows]
+
+    async def get_health_summary(self) -> dict:
+        """获取健康状态摘要"""
+        if not self.pool: return {}
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE is_active = TRUE) as active,
+                    COUNT(*) FILTER (WHERE is_active = FALSE) as disabled,
+                    COUNT(*) FILTER (WHERE health_status = 'healthy') as healthy,
+                    COUNT(*) FILTER (WHERE health_status = 'unhealthy') as unhealthy,
+                    COUNT(*) FILTER (WHERE health_status = 'unknown') as unknown
+                FROM gemini_accounts
+            """)
+            return dict(row)
+
+    async def increment_network_error_count(self, account_id: int) -> int:
+        """增加网络错误计数并返回当前计数"""
+        if not self.pool: return 0
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE gemini_accounts 
+                SET network_error_count = network_error_count + 1,
+                    last_network_error_time = NOW()
+                WHERE id = $1
+            """, account_id)
+            
+            # 获取更新后的计数
+            row = await conn.fetchrow("""
+                SELECT network_error_count FROM gemini_accounts WHERE id = $1
+            """, account_id)
+            
+            return row['network_error_count'] if row else 0
+
+    async def reset_network_error_count(self, account_id: int):
+        """重置网络错误计数"""
+        if not self.pool: return
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE gemini_accounts 
+                SET network_error_count = 0,
+                    last_network_error_time = NULL
+                WHERE id = $1
+            """, account_id)
+        logger.info(f"🔄 账号 [{account_id}] 网络错误计数已重置")
 
 db = DatabaseManager()
