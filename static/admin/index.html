@@ -149,6 +149,32 @@
                 opacity: .5;
             }
         }
+
+        /* 自定义滚动条样式 */
+        .custom-scrollbar {
+            scrollbar-width: thin;
+            scrollbar-color: #30363d #161b22;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #161b22;
+            border-radius: 4px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+            border: 2px solid #161b22;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #404751;
+        }
     </style>
 </head>
 
@@ -414,20 +440,22 @@
                     </div>
                 </div>
 
-                <div class="space-y-3 mb-6 max-h-[70vh] overflow-y-auto pr-2">
-                    <div v-for="result in healthResult.results" :key="result.account_id" 
-                        class="p-3 rounded-lg border" :class="getStatusBorderClass(result)">
-                        <div class="flex items-center justify-between mb-2">
-                            <span class="font-medium text-white truncate">{{ result.account_name }}</span>
-                            <span class="text-xs px-2 py-1 rounded whitespace-nowrap" :class="getStatusBadgeClass(result)">
-                                {{ result.status === 'success' ? '✓ 正常' : '✗ 异常' }}
-                            </span>
-                        </div>
-                        <div class="text-xs text-gray-400">
-                            <div>状态: {{ result.status === 'success' ? '正常' : '异常' }}</div>
-                            <div v-if="result.message" class="truncate">{{ result.message }}</div>
-                            <div v-if="result.disabled" class="text-red-400 mt-1">
-                                ⚠️ 已自动禁用
+                <div class="mb-6 max-h-[60vh] overflow-y-auto custom-scrollbar">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                        <div v-for="result in healthResult.results" :key="result.account_id" 
+                            class="p-3 rounded-lg border min-w-0" :class="getStatusBorderClass(result)">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-medium text-white truncate">{{ result.account_name }}</span>
+                                <span class="text-xs px-2 py-1 rounded whitespace-nowrap" :class="getStatusBadgeClass(result)">
+                                    {{ result.status === 'success' ? '✓ 正常' : '✗ 异常' }}
+                                </span>
+                            </div>
+                            <div class="text-xs text-gray-400 space-y-1">
+                                <div>状态: {{ result.status === 'success' ? '正常' : '异常' }}</div>
+                                <div v-if="result.message" class="truncate">{{ result.message }}</div>
+                                <div v-if="result.disabled" class="text-red-400">
+                                    ⚠️ 已自动禁用
+                                </div>
                             </div>
                         </div>
                     </div>
