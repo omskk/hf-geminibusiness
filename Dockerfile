@@ -7,8 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get purge -y gcc \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
-COPY main.py .
-COPY database.py .
-COPY static/ ./static/
+COPY . .
 
 CMD ["python", "-u", "main.py"]
