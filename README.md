@@ -1,6 +1,6 @@
 # Gemini Business OpenAI Gateway
 
-将 Google Gemini Business API (Widget Interface) 转换为 OpenAI 格式的网关服务。支持 **真流式 (True Streaming)** 输出，**多账号负载均衡**，**Web 管理后台**，像官网一样逐字显示。
+将 Google Gemini Business API (Widget Interface) 转换为 OpenAI 格式的网关服务。支持 **真流式 (True Streaming)** 输出，**多账号负载均衡**，**Web 管理后台**，**智能会话缓存管理**，像官网一样逐字显示。
 
 ## ✨ 核心特性
 
@@ -16,6 +16,13 @@
 - **会话持久化**: 自动管理会话 ID，支持多轮对话上下文
 - **模型粘性 (Model Stickiness)**: 为用户自动升级并记住模型偏好
 - **PostgreSQL 存储**: 账号信息持久化存储，支持动态增删改查
+
+### 🧠 智能会话缓存管理
+- **三级缓存策略**: Hot(5000) + Warm(3000) + Cold(2000) 会话池，优化内存使用
+- **TTL 过期机制**: 会话 2 小时自动过期 (`SESSION_TTL=7200`)
+- **内存保护**: 当内存使用达到 80% 时触发警告，90% 时自动清理冷会话
+- **定期清理**: 每 5 分钟 (`CACHE_CLEANUP_INTERVAL=300`) 清理过期会话
+- **高效检索**: 基于 LRU 算法的快速会话查找
 
 ### 🎛 Web 管理后台
 - **可视化界面**: 现代化暗色主题管理控制台 (`/admin`)
@@ -75,6 +82,15 @@ HEALTH_CHECK_NETWORK_ERROR_THRESHOLD=3
 
 # ---------- 数据库配置 (多账号模式需要) ----------
 DATABASE_URL=postgresql://user:password@localhost:5432/gemini_db
+
+# ---------- 会话池配置 ----------
+CACHE_HOT_SIZE=5000
+CACHE_WARM_SIZE=3000
+CACHE_COLD_SIZE=2000
+SESSION_TTL=7200
+CACHE_CLEANUP_INTERVAL=300
+MEMORY_WARNING_THRESHOLD=0.8
+MEMORY_CRITICAL_THRESHOLD=0.9
 ```
 
 ### 方式二: 数据库多账号模式 (推荐)
@@ -211,6 +227,7 @@ response = client.chat.completions.create(
 - `gemini-auto` (默认，自动选择)
 - `gemini-2.5-flash` (快速版本)
 - `gemini-2.5-pro` (专业版本)
+- `gemini-3-flash-preview` (推荐，最新预览版)
 - `gemini-3-pro-preview` (推荐，最新预览版)
 
 > **智能升级**: 客户端请求的模型可能会被自动升级到更好的版本，日志会记录升级信息。
@@ -221,6 +238,49 @@ response = client.chat.completions.create(
 
 ```bash
 docker-compose up -d
+```
+
+### 环境变量完整配置
+
+完整的 `.env` 文件配置示例：
+
+```env
+# ---------- 核心认证 (必需) ----------
+# 从浏览器 Cookie 获取 (business.gemini.google.com)
+SECURE_C_SES=your_secure_c_ses_value
+CSESIDX=your_csesidx_value
+CONFIG_ID=your_config_id_value   # 通常在网络请求 Payload 中可见
+
+# ---------- 选填配置 ----------
+# 主机认证 Cookie (部分账号可能需要)
+HOST_C_OSES=
+
+# 服务访问密钥 (OpenAI Client 用于认证的 Key)
+API_KEY=sk-my-secret-key
+
+# HTTP 代理 
+PROXY=http://127.0.0.1:7890
+
+# 健康检查配置
+HEALTH_CHECK_INTERVAL=300
+HEALTH_CHECK_ENABLED=true
+HEALTH_CHECK_TIMEOUT=30
+HEALTH_CHECK_RETRY_COUNT=2
+HEALTH_CHECK_CONCURRENT_LIMIT=5
+HEALTH_CHECK_AUTO_DISABLE=true
+HEALTH_CHECK_NETWORK_ERROR_THRESHOLD=3
+
+# 会话池配置
+CACHE_HOT_SIZE=5000
+CACHE_WARM_SIZE=3000
+CACHE_COLD_SIZE=2000
+SESSION_TTL=7200
+CACHE_CLEANUP_INTERVAL=300
+MEMORY_WARNING_THRESHOLD=0.8
+MEMORY_CRITICAL_THRESHOLD=0.9
+
+# 数据库配置 (多账号模式需要)
+DATABASE_URL=postgresql://user:password@localhost:5432/gemini_db
 ```
 
 ### 手动 Docker 部署
