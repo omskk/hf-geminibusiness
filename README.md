@@ -58,6 +58,21 @@ API_KEY=sk-my-secret-key
 # HTTP 代理 
 PROXY=http://127.0.0.1:7890
 
+# 健康检查间隔 (秒)，默认300秒 (5分钟)
+HEALTH_CHECK_INTERVAL=300
+# 是否启用健康检查，默认true
+HEALTH_CHECK_ENABLED=true
+# 健康检查超时时间(秒)，默认30秒
+HEALTH_CHECK_TIMEOUT=30
+# 健康检查重试次数，默认2次
+HEALTH_CHECK_RETRY_COUNT=2
+# 并发健康检查数量限制，默认5个
+HEALTH_CHECK_CONCURRENT_LIMIT=5
+# 检测到异常时是否自动禁用账号，默认true
+HEALTH_CHECK_AUTO_DISABLE=true
+# 网络错误连续失败阈值，默认3次
+HEALTH_CHECK_NETWORK_ERROR_THRESHOLD=3
+
 # ---------- 数据库配置 (多账号模式需要) ----------
 DATABASE_URL=postgresql://user:password@localhost:5432/gemini_db
 ```
@@ -70,6 +85,37 @@ DATABASE_URL=postgresql://user:password@localhost:5432/gemini_db
 4. **添加账号**：通过 UI 批量添加多个 Gemini Business 账号
 
 > 如果未配置数据库，服务将回退到 `.env` 中的单账号模式
+
+## 🏥 健康检查机制
+
+### 自动健康检查
+- **启动检查**：服务启动时自动检查所有启用账号的健康状态
+- **定时检查**：按配置的 `HEALTH_CHECK_INTERVAL` 间隔定期检查账号状态
+- **智能禁用**：检测到账号异常时自动禁用（可通过 `HEALTH_CHECK_AUTO_DISABLE` 控制）
+- **并发检查**：支持多账号并行健康检查（通过 `HEALTH_CHECK_CONCURRENT_LIMIT` 限制并发数）
+- **重试机制**：失败时自动重试（通过 `HEALTH_CHECK_RETRY_COUNT` 配置重试次数）
+- **超时控制**：单次检查超时时间（通过 `HEALTH_CHECK_TIMEOUT` 配置）
+- **网络容错**：连续网络错误达到阈值时标记为异常（通过 `HEALTH_CHECK_NETWORK_ERROR_THRESHOLD` 配置）
+
+### 手动健康检查
+可以通过API手动触发健康检查：
+
+```bash
+# 触发全局健康检查
+POST /api/admin/health-check
+Authorization: Bearer <API_KEY>
+
+# 检查特定账号
+POST /api/admin/accounts/{id}/health-check
+Authorization: Bearer <API_KEY>
+```
+
+### 健康检查日志
+健康检查过程会详细记录日志，便于监控和调试：
+- ✅ 账号健康检查通过
+- ⚠️ 账号健康检查失败
+- ❌ 账号JWT刷新失败
+- 🏥 健康检查完成统计（成功/失败/禁用数量）
 
 ## 🚀 快速启动
 
@@ -180,9 +226,17 @@ docker-compose up -d
 ### 手动 Docker 部署
 
 ```bash
+# 构建镜像（已优化Dockerfile，构建更高效）
 docker build -t gemini-gateway .
+
+# 运行容器
 docker run -d -p 7860:7860 --env-file .env gemini-gateway
 ```
+
+### Dockerfile 优化特性
+- **依赖缓存优化**：先复制 `requirements.txt` 单独安装依赖，利用Docker层缓存
+- **构建效率提升**：合并文件复制操作，减少Docker层数
+- **镜像体积优化**：清理构建过程中安装的临时包
 
 ## 🗄 数据库管理
 
@@ -217,15 +271,15 @@ CREATE TABLE gemini_accounts (
 
 ## 📊 管理 API
 
-### 获取所有账号
+### 账号管理
 
+#### 获取所有账号
 ```bash
 GET /api/admin/accounts
 Authorization: Bearer <API_KEY>
 ```
 
-### 添加账号
-
+#### 添加账号
 ```bash
 POST /api/admin/accounts
 Authorization: Bearer <API_KEY>
@@ -240,8 +294,7 @@ Content-Type: application/json
 }
 ```
 
-### 更新账号
-
+#### 更新账号
 ```bash
 PUT /api/admin/accounts/{id}
 Authorization: Bearer <API_KEY>
@@ -252,10 +305,29 @@ Content-Type: application/json
 }
 ```
 
-### 删除账号
-
+#### 删除账号
 ```bash
 DELETE /api/admin/accounts/{id}
+Authorization: Bearer <API_KEY>
+```
+
+### 健康检查 API
+
+#### 全局健康检查
+```bash
+POST /api/admin/health-check
+Authorization: Bearer <API_KEY>
+```
+
+#### 单账号健康检查
+```bash
+POST /api/admin/accounts/{id}/health-check
+Authorization: Bearer <API_KEY>
+```
+
+#### 获取健康检查状态
+```bash
+GET /api/admin/health-status
 Authorization: Bearer <API_KEY>
 ```
 
